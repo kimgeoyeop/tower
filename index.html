@@ -219,6 +219,7 @@
   let towers = [];
   let gold = 3;
   let wave = 1;
+  let isEnd = false;
 
   function spawnWave() {
     for(let i=0; i<10; i++) {
@@ -235,6 +236,10 @@
   spawnWave();
 
   function update() {
+    if (isEnd) {
+        return;
+    }
+
     enemies.forEach(e => e.update());
     enemies = enemies.filter(e => !e.isDead);
     towers.forEach(t => t.update());
@@ -248,9 +253,9 @@
         if (animationFrameId) {
             cancelAnimationFrame(animationFrameId); // 중복 confirm 방지
             animationFrameId = null;
-
+            isEnd = true;
             if (confirm('패배! 다시 시작하시겠습니까?')) {
-            resetGame();
+                location.reload();
             }
         }
     }
