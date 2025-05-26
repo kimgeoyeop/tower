@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>타워 디펜스 업그레이드</title>
+<style>
+  body, html { margin:0; padding:0; background:#222; color:#eee; font-family:sans-serif; text-align:center; }
+  #game { background:#333; display:block; margin:20px auto; border: 2px solid #555; }
+  #info { margin-top:10px; }
+  #toast {
+    position: fixed;
+    top: 20px; left: 50%; transform: translateX(-50%);
+    padding: 10px 20px;
+    font-weight: bold;
+    color: white;
+    border-radius: 8px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+    z-index: 100;
+  }
+  #toast.show {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  #toast.success { background-color: #4CAF50; }
+  #toast.fail { background-color: #f44336; }
+
+  #remain {
+    margin-top: 10px;
+    font-size: 18px;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="game" width="440" height="440"></canvas>
+<div id="info">
+  <div>골드: <span id="gold">3</span> | 웨이브: <span id="wave">1</span></div>
+  <div>타워 건설하려면 빈 칸을 터치하세요 (1골드 소모)<br>타워 클릭 시 업그레이드 시도 (비용 증가)</div>
+</div>
+<div id="remain">남은 몬스터: 0</div>
+<div id="toast"></div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const toast = document.getElementById('toast');
+  const remainText = document.getElementById('remain');
+
+  const GRID_SIZE = 20;
+  const CELL_GAP = 2;
+  const CELL_SIZE = (canvas.width / GRID_SIZE) - CELL_GAP;
+
+  function createInnerPath() {
+    const path = [];
+    for(let x=1; x<GRID_SIZE-1; x++) path.push({x, y:1});
+    for(let y=2; y<GRID_SIZE-1; y++) path.push({x:GRID_SIZE-2, y});
+    for(let x=GRID_SIZE-3; x>=1; x--) path.push({x, y:GRID_SIZE-2});
+    for(let y=GRID_SIZE-3; y>1; y--) path.push({x:1, y});
+    return path;
+  }
+
+  const path = createInnerPath();
+
+  class Enemy {
+    constructor(wave, startIndex) {
+      this.pathIndex = startIndex;
+      this.healthMax = 3 * (2 ** (wave -1));
+      this.health = this.healthMax;
+      this.isDead = false;
+      this.speed = 0.02;
+      this.progress = 0;
+    }
+    update() {
+      this.progress += this.speed;
+      if (this.progress >= 1) {
+        this.pathIndex = (this.pathIndex + 1) % path.length;
+        this.progress = 0;
+      }
+    }
+    getPosition() {
+      const current = path[this.pathIndex];
+      const next = path[(this.pathIndex + 1) % path.length];
+      const x = (current.x + (next.x - current.x) * this.progress) * (CELL_SIZE + CELL_GAP);
+      const y = (current.y + (next.y - current.y) * this.progress) * (CELL_SIZE + CELL_GAP);
+      return {x, y};
+    }
+    draw() {
+      const pos = this.getPosition();
+      ctx.fillStyle = 'red';
+      ctx.fillRect(pos.x, pos.y, CELL_SIZE, CELL_SIZE);
+      ctx.fillStyle = 'black';
+      ctx.fillRect(pos.x, pos.y - 5, CELL_SIZE, 4);
+      ctx.fillStyle = 'lime';
+      ctx.fillRect(pos.x, pos.y - 5, CELL_SIZE * (this.health / this.healthMax), 4);
+    }
+  }
+
+  class Projectile {
+    constructor(x, y, target, damage) {
+      this.x = x;
+      this.y = y;
+      this.target = target;
+      this.speed = 4;
+      this.isHit = false;
+      this.size = CELL_SIZE / 4;
+      this.damage = damage;
+    }
+    update() {
+      if(this.target.isDead) {
+        this.isHit = true;
+        return;
+      }
+      const targetPos = this.target.getPosition();
+      const dx = targetPos.x + CELL_SIZE / 2 - this.x;
+      const dy = targetPos.y + CELL_SIZE / 2 - this.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if(dist < this.speed) {
+        this.isHit = true;
+        this.target.health -= this.damage;
+        if(this.target.health <= 0) {
+          this.target.isDead = true;
+          const bonus = Math.floor(wave / 3); // 3의 배수마다 보너스 증가
+          gold += 1 + bonus;
+        }
+        return;
+      }
+      this.x += (dx / dist) * this.speed;
+      this.y += (dy / dist) * this.speed;
+    }
+    draw() {
+      ctx.fillStyle = 'yellow';
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.size / 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  class Tower {
+    constructor(gridX, gridY) {
+      this.gridX = gridX;
+      this.gridY = gridY;
+      this.cooldown = 0;
+      this.projectiles = [];
+      this.upgradeCount = 1;
+      this.attackPower = 1;
+    }
+    getUpgradeCost() {
+      return Math.pow(2, this.upgradeCount);
+    }
+    getUpgradeChance() {
+      switch(this.upgradeCount) {
+        case 1: return 1.0;   // 100%
+        case 2: return 0.5;   // 50%
+        case 3: return 0.25;  // 25%
+        default: return 0.1;  // 10% 그 이후
+      }
+    }
+    upgrade() {
+      const cost = this.getUpgradeCost();
+      if(gold < cost) {
+        showToast('골드가 부족합니다(필요 골드:'+cost+")", false);
+        return;
+      }
+      gold -= cost;
+      const chance = this.getUpgradeChance();
+      if(Math.random() < chance) {
+        // 성공
+        this.upgradeCount++;
+        this.attackPower *= 2;
+        showToast('성공했습니다!!', true);
+      } else {
+        // 실패
+        showToast('실패했습니다..', false);
+      }
+    }
+    update() {
+      if(this.cooldown > 0) {
+        this.cooldown--;
+      } else {
+        const targets = enemies.filter(e => !e.isDead);
+        if(targets.length > 0) {
+          const target = targets[0];
+          const tx = this.gridX * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2;
+          const ty = this.gridY * (CELL_SIZE + CELL_GAP) + CELL_SIZE / 2;
+          this.projectiles.push(new Projectile(tx, ty, target, this.attackPower));
+          this.cooldown = 180;
+        }
+      }
+      this.projectiles = this.projectiles.filter(p => !p.isHit);
+      this.projectiles.forEach(p => p.update());
+    }
+    draw() {
+      const x = this.gridX * (CELL_SIZE + CELL_GAP);
+      const y = this.gridY * (CELL_SIZE + CELL_GAP);
+
+      // 업그레이드 단계에 따른 색상
+      if(this.upgradeCount >= 7) ctx.fillStyle = 'gold';
+      else if(this.upgradeCount >= 5) ctx.fillStyle = 'blue';
+      else if(this.upgradeCount >= 3) ctx.fillStyle = 'orange';
+      else ctx.fillStyle = 'cyan';
+
+      ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
+
+      ctx.fillStyle = 'black';
+      ctx.font = '16px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(this.upgradeCount, x + CELL_SIZE / 2, y + CELL_SIZE / 2);
+
+      this.projectiles.forEach(p => p.draw());
+    }
+  }
+
+  let enemies = [];
+  let towers = [];
+  let gold = 3;
+  let wave = 1;
+
+  function spawnWave() {
+    for(let i=0; i<10; i++) {
+      enemies.push(new Enemy(wave, i * Math.floor(path.length / 10)));
+    }
+  }
+
+  setInterval(() => {
+    wave++;
+    spawnWave();
+    document.getElementById('wave').textContent = wave;
+  }, 20000);
+
+  spawnWave();
+
+  function update() {
+    enemies.forEach(e => e.update());
+    enemies = enemies.filter(e => !e.isDead);
+    towers.forEach(t => t.update());
+    document.getElementById('gold').textContent = gold;
+
+    // 남은 몬스터 수 업데이트
+    remainText.textContent = `남은 몬스터: ${enemies.length}`;
+
+    // 패배 조건 검사
+    if (enemies.length > 20) {
+        if (animationFrameId) {
+            cancelAnimationFrame(animationFrameId); // 중복 confirm 방지
+            animationFrameId = null;
+
+            if (confirm('패배! 다시 시작하시겠습니까?')) {
+            resetGame();
+            }
+        }
+    }
+  }
+
+  function drawGrid() {
+    ctx.fillStyle = '#222';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    for(let y=0; y<GRID_SIZE; y++) {
+      for(let x=0; x<GRID_SIZE; x++) {
+        ctx.strokeStyle = '#444';
+        ctx.strokeRect(x*(CELL_SIZE+CELL_GAP), y*(CELL_SIZE+CELL_GAP), CELL_SIZE, CELL_SIZE);
+      }
+    }
+  }
+
+  function drawPath() {
+    ctx.fillStyle = '#555';
+    path.forEach(p => {
+      const x = p.x * (CELL_SIZE + CELL_GAP);
+      const y = p.y * (CELL_SIZE + CELL_GAP);
+      ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
+    });
+  }
+
+  function draw() {
+    drawGrid();
+    drawPath();
+    towers.forEach(t => t.draw());
+    enemies.forEach(e => e.draw());
+  }
+
+function resetGame() {
+  cancelAnimationFrame(animationFrameId); // ✅ 기존 루프 중단
+  animationFrameId = null;
+
+  gold = 3;
+  wave = 1;
+  enemies = [];
+  towers = [];
+  spawnWave();
+  document.getElementById('gold').textContent = gold;
+  document.getElementById('wave').textContent = wave;
+  remainText.textContent = `남은 몬스터: 0`;
+
+  gameLoop();
+}
+
+  let animationFrameId;
+  function gameLoop() {
+    update();
+    draw();
+    animationFrameId = requestAnimationFrame(gameLoop);
+  }
+
+  canvas.addEventListener('click', e => {
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    const gridX = Math.floor(mouseX / (CELL_SIZE + CELL_GAP));
+    const gridY = Math.floor(mouseY / (CELL_SIZE + CELL_GAP));
+
+    // 타워 클릭 업그레이드 체크
+    for(const tower of towers) {
+      if(tower.gridX === gridX && tower.gridY === gridY) {
+        tower.upgrade();
+        return;
+      }
+    }
+
+    // 빈칸이면 타워 설치 (1골드)
+    if(gold >= 1) {
+      // 길은 못짓기
+      if(path.some(p => p.x === gridX && p.y === gridY)) {
+        return;
+      }
+      // 이미 타워 있으면 안됨
+      if(towers.some(t => t.gridX === gridX && t.gridY === gridY)) {
+        return;
+      }
+      gold--;
+      towers.push(new Tower(gridX, gridY));
+    }
+  });
+
+  function showToast(msg, success) {
+    toast.textContent = msg;
+    toast.className = success ? 'show success' : 'show fail';
+    clearTimeout(toast._timeout);
+    toast._timeout = setTimeout(() => {
+      toast.className = '';
+    }, 1500);
+  }
+
+  gameLoop();
+
+})();
+</script>
+
+</body>
+</html>
